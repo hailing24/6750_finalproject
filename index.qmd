@@ -13,61 +13,45 @@ format:
 
 ## Introduction
 
-Los Angeles County’s PM2.5 monitoring network is the backbone for estimating exposure, evaluating compliance, and targeting mitigation resources. Yet coverage remains uneven, especially relative to the sprawling freeways that channel both commuters and pollution. I focus on Los Angeles County because freeway-driven emissions are a dominant exposure pathway there, and any monitoring bias toward road corridors can meaningfully distort county-wide exposure assessments. This project set out to quantify how well the existing network samples space, whether monitors cluster along transportation corridors, and how those spatial patterns could bias our view of air quality. Framing the findings in a public-facing website gives local agencies and residents a transparent look at where data gaps remain.
+Los Angeles County’s PM2.5 monitoring network has always struck me as oddly distributed. It underpins exposure estimates, compliance checks, and policy conversations, but the coverage still feels lopsided once you look past downtown and the freeway belt. I picked L.A. because freeway exhaust is a defining part of daily life there; if the monitors lean toward road corridors, our exposure math ends up skewed. So I set out to see how evenly the network samples space, whether the instruments really hug the transportation grid, and how that pattern might warp our collective sense of air quality. Putting everything into a public-facing page lets agencies and residents see the same evidence I’m seeing, rather than a polished deck with tidy bullets.
 
 ## Background & Research Questions
 
-- **RQ1.** Are PM2.5 monitors more concentrated near major roads?
-- **RQ2.** Do monitoring stations display spatial clustering beyond complete spatial randomness (CSR)?
-
-**Why it matters.**
-
-- Systematic spatial bias undermines regional exposure estimates.
-- Road-adjacent siting can overstate traffic-related pollution while missing other sources.
-- Spatial inequities have environmental justice implications across Los Angeles’s diverse neighborhoods.
-
-**Study area.** Los Angeles County (study window area = 10,598.78 km², computed directly from the EPSG:3310 boundary) with 12 regulatory PM2.5 monitors retained after quality control; the boundary and covariates come from TIGER/Line and OpenStreetMap, respectively.
+Going in, I really had two questions: (1) do the PM2.5 monitors pile up near major roads, and (2) even after accounting for that tendency, do the sites still show clustering beyond complete spatial randomness (CSR)? Those questions sound dry on paper, but they matter because biased siting throws off regional exposure estimates, exaggerates traffic pollution, and leaves quieter neighborhoods without data. Environmental justice concerns keep popping up in Los Angeles, so ignoring the spatial footprint of the monitoring program felt irresponsible. The study window covers all of Los Angeles County (10,598.78 km² in EPSG:3310 units) with 12 regulatory monitors that made it through quality control. TIGER/Line supplied the boundary and OpenStreetMap filled in the road network so I could line up monitors with the infrastructure shaping them.
 
 ## Literature Review
 
-Two strands of scholarship motivate the analysis. First, environmental justice research shows that pollution burdens often fall on communities of color living near major roadways, while monitoring resources lag behind (_e.g._, Clark et al., 2017; Woo et al., 2019). Second, the spatial statistics literature warns that poorly placed monitors bias trend detection because kriging and exposure models inherit the first-order (intensity) and second-order (interaction) structure of the input points (Diggle, 2013). Taken together, these findings imply that siting monitors near roads could capture the highest emissions, but failing to cover inland valleys or the harbor might miss hotspots entirely. The regression and point-pattern diagnostics used here build directly on these theoretical insights.
+Two threads in the literature pushed me toward this project. Environmental justice work keeps reminding us that communities of color shoulder disproportionate pollution near big roads, while the monitors that should document those loads show up late or never (_e.g._, Clark et al., 2017; Woo et al., 2019). At the same time, spatial statistics folks like Diggle (2013) warn that when we place monitors badly, every downstream model inherits those first- and second-order wobbles. Put differently, hugging freeways might catch the nastiest emissions, but it also risks missing inland valleys or the port, so the “average” picture looks cleaner than it feels. I leaned on those insights when choosing the regression and point-pattern tools below.
 
 ## Methodology
 
-- **Data assembly.** Daily PM2.5 values (EPA AQS, 2016–2023) were joined to site metadata to obtain land use, location setting, and coordinates. TIGER/Line county polygons defined the study boundary, while OpenStreetMap supplied the major-road network.
-- **Spatial preprocessing.** Sites inside Los Angeles County were averaged to a mean daily PM2.5 value per monitor (retaining only unique stations after filtering). All spatial layers were projected to EPSG:3310 to work in equal-area meters, saved as geopackages/shapefiles, and cached for reproducibility (`prepare_data.qmd` and `eda.qmd`).
-- **Point-pattern construction.** The monitor centroids defined a planar point pattern object (`monitor_ppp`), the county polygon became the observation window, and major roads were converted to a line-segment pattern to compute distance-based covariates (`methods.qmd`).
-- **Statistical workflow.** First-order structure was examined through kernel intensity surfaces and exploratory plots. Second-order structure (interaction between points) used pair-correlation and L-function envelopes with 999 simulations. Finally, an inhomogeneous Poisson regression tested whether monitor intensity decays with distance from major roads.
+I pulled daily PM2.5 values from EPA’s AQS (2016–2023) and joined the records to site metadata for land use, location type, and coordinates. TIGER/Line gave me the county boundary, OpenStreetMap provided the major-road network, and everything went into EPSG:3310 so distances mean something. After clipping to Los Angeles County, I averaged each station to a mean daily PM2.5 value and kept one record per regulatory site. The monitor points turned into a planar point pattern (`monitor_ppp`), the county polygon acted as the study window, and the road lines supplied the distance covariate. From there I walked through kernel intensity estimates, pair-correlation and L-function envelopes with 999 simulations, and finally an inhomogeneous Poisson regression to see whether intensity falls off with distance from big roads. Nothing fancy—just enough structure to keep the analysis reproducible (`prepare_data.qmd`, `eda.qmd`, and `methods.qmd` have the code).
 
 ## Exploratory Data Analysis (EDA)
 
-Los Angeles County hosts a relatively small regulatory PM2.5 network, with an average concentration of 8.84 µg/m³ (sd = 3.42; roughly a 1–13 µg/m³ range). Most stations cluster in the San Gabriel Valley and South Bay, leaving the Antelope Valley and southeastern industrial belt sparsely monitored. The paired maps below show coverage and the spatial gradient in mean PM2.5.
+Once the points were on a map, the sparse nature of the network jumped out. The 12 regulatory monitors average 8.84 µg/m³ (sd = 3.42, roughly 1–13 µg/m³), and most of them sit in the San Gabriel Valley or South Bay. Antelope Valley and the industrial southeast barely register. The first map simply shows where the monitors live; the second uses color to highlight the PM2.5 gradient.
 
 ![Monitor locations relative to the county boundary.](plots/la_monitor_locations.png)
 
 ![Color scale conveys the monitor-level mean PM2.5 concentrations.](plots/la_pm25_monitors.png)
 
-Adding major roads clarifies how strongly siting decisions follow the transportation network: monitors hug the spine of the I-10/I-710 corridor and the South Bay freeway complex, while the northern desert and harbor periphery remain nearly blank. This figure mirrors the “Background” slide in the deck so the web page visually matches the presentation.
+Overlaying major roads makes the bias hard to unsee. Stations hug the I-10/I-710 corridor and the South Bay freeway tangle, while the northern desert and the harbor edges stay blank. I reused the slide figure so the story stays consistent between the deck and this page.
 
 ![Mean PM2.5 overlaid with OpenStreetMap major roads.](plots/la_major_roads_monitors.png)
 
-The same pattern is visible when we color each site by its distance to the nearest major road—warm colors sit directly on arterials, underscoring a design focused on traffic exposure.
+Coloring each site by its distance to the nearest major road tells the same story—warm hues practically sit on the asphalt, so the network seems designed around traffic exposure.
 
 ![Distance from each monitor to its nearest major road.](plots/la_pm25_distance_map.png)
 
-Complementary scatterplots confirm that mean PM2.5 drops off as monitors move away from major routes, hinting that regressions incorporating the distance covariate should be significant.
+The scatter between mean PM2.5 and road distance slopes downward, which made me pretty sure the regression would flag a significant distance effect.
 
 ![Scatter showing PM2.5 versus distance to the nearest major road.](plots/la_pm25_distance_to_roads.png)
 
-Additional EDA revealed:
-
-- **Road proximity.** The median monitor lies only 0.37 km from a major road (min 0.01 km; max 1.72 km), hinting at siting preferences tied to accessibility and emission sources.
-- **Land-use distribution.** Urban land-use designations dominate the sample, meaning rural backgrounds and coastal zones are underrepresented (`eda.qmd` provides boxplots and LISA diagnostics).
-- **Spatial dependence.** Kernel-density surfaces show a ridge of monitors along the I-10/I-710 corridor, while LISA statistics highlight a High–High cluster south of downtown where elevated PM2.5 and neighboring monitors coincide.
+A couple of other nuggets: the median monitor is only 0.37 km from a major road (ranging from 0.01 to 1.72 km); urban land-use tags dominate, so rural backdrops and coastal breezes almost never get sampled; and kernel-density plus LISA stats mark a high–high cluster south of downtown where elevated PM2.5 aligns with closely spaced monitors. That said, the small sample size keeps me cautious—one relocated site would change the visuals noticeably.
 
 ## Spatial Modeling Visuals
 
-The figures below (rendered in EPSG:3310 meters) connect qualitative impressions with the formal statistical tests.
+The next trio of figures translates those gut feelings into formal diagnostics, all in EPSG:3310 meters:
 
 ![Kernel intensity with PPL bandwidth optimization highlights first-order hotspots.](plots/la_monitor_kernel_intensity.png)
 
@@ -75,52 +59,38 @@ The figures below (rendered in EPSG:3310 meters) connect qualitative impressions
 
 ![Observed L-function relative to the CSR envelope (999 simulations).](plots/la_monitor_L_function.png)
 
-Key read-outs:
-
-- **Kernel vs. model agreement.** The kernel smoother and the model-based intensity surface both peak over the freeway-heavy basin, indicating the distance covariate captures where monitors already cluster.
-- **Clustering beyond CSR.** The observed L-function lies above the CSR envelope over a broad band of distances, indicating clustering beyond complete spatial randomness.
-- **Distance effect visualization.** Together with the distance-to-road map and scatter plot, these figures visually reinforce the regression finding that intensity declines rapidly with distance from major corridors.
+The kernel smoother and the model-based intensity surface peak over the same freeway-heavy basin, so the distance covariate is pulling real weight rather than serving as a decorative map. Meanwhile, the observed L-function rides above the CSR envelope across a wide range of distances, which is a polite way of saying “yep, the sites cluster even after you account for the road trend.” Pairing these visuals with the distance maps convinced me the regression results weren’t just statistical noise.
 
 ## Hypothesis Testing (Regression)
 
-To formalize the “near-road bias” hypothesis, I fit an inhomogeneous Poisson point-process model with monitor intensity as a log-linear function of distance to the nearest major road:
+To keep myself honest, I fit an inhomogeneous Poisson point-process model with monitor intensity as a log-linear function of distance to the nearest major road:
 
 \[
 \log \lambda(s) = \beta_0 + \beta_1 \times \text{dist\_road}(s)
 \]
 
-where \( \lambda(s) \) is the expected monitor density at location \( s \). The fitted coefficients (`methods.qmd`) were:
+where \( \lambda(s) \) is the expected monitor density at location \( s \). The coefficients from `methods.qmd` landed at:
 
 - \( \hat{\beta}_0 = -13.32 \) (SE = 0.019, *p* < 0.001)
 - \( \hat{\beta}_1 = -0.00111 \) per meter (SE = 2.5e-5, *p* < 0.001)
 
-The estimated distance-to-road effect is negative and statistically significant, consistent with greater monitor density near major roads. Interpreting the coefficient suggests a steep decay in fitted intensity with distance from major corridors. Quadrat tests and Monte Carlo envelopes show no major lack-of-fit, suggesting the distance covariate captures a dominant first-order trend. However, residual second-order clustering persists because the network contains so few stations—limiting the power of purely spatial terms.
+That negative distance coefficient means the fitted intensity drops quickly as you move away from freeways—exactly what the maps hinted at. It’s a small number, but in meters it stacks up fast. Quadrat tests and Monte Carlo envelopes didn’t flag any glaring misfit, so the distance term seems to capture the dominant first-order structure. That said, with only a dozen monitors, some second-order clustering hangs around simply because there aren’t enough points to smooth things out.
 
 ## Key Findings
 
 **Question 1: Are monitors more concentrated near major roads?**  
-✅ Yes—strong systematic placement bias.
-
-- The estimated distance-to-road effect is negative and statistically significant, consistent with greater monitor density near major roads.
-- Interpreting the coefficient suggests fitted intensity decays rapidly with distance from major corridors.
-- The major-road overlay and distance maps above provide the visual counterpart to this statistical result.
+Pretty much. The regression’s distance term is negative, significant, and large enough that intensity plummets as soon as you leave a freeway corridor. The road overlays and distance maps tell the same story, so I feel comfortable saying the siting strategy chases traffic.
 
 **Question 2: Do monitors show clustering beyond CSR?**  
-✅ Yes—observable spatial aggregation.
+Also yes. The observed L-function rides above the CSR envelope for a wide span of distances, and the kernel intensity contours echo that ridge. Even after accounting for the distance effect, residual clustering hangs on, which tracks with how few sites we’re dealing with.
 
-- The observed L-function lies above the CSR envelope over a broad range of distances, indicating clustering beyond complete spatial randomness.
-- Kernel intensity contours show the same clustering ridge, and the inhomogeneous model residuals remain spatially structured.
+**Implications.**  
+Because of this bias, huge swaths of the county lack a local monitor while road-adjacent areas get sampled repeatedly. That setup probably overplays traffic emissions and underplays port or warehouse plumes. Any exposure assessment or compliance check using this network needs to correct for the sampling bias or augment the system with low-cost sensors in the neighborhoods that currently have no voice in the data.
 
-**Implications.**
-
-- Systematic spatial bias in network design means many neighborhoods lack a local monitor.
-- Road-proximate areas are over-monitored, potentially overemphasizing traffic pollution relative to industrial or port sources.
-- Exposure assessments should correct for spatial sampling bias or augment the network (e.g., low-cost sensors) in underserved zones to address environmental justice concerns.
-
-Together, these sections compile every figure and result from the data prep, EDA, and methods notebooks into a single landing page—no additional tabs required.
+Everything on this page stitches together the prep, EDA, and methods work so you don’t have to bounce between tabs.
 
 ## Conclusion
 
-This project combined regulatory PM2.5 records, TIGER boundaries, and OSM road data to build a reproducible point-pattern analysis of Los Angeles’s monitoring network. Exploratory maps, kernel intensity estimates, and CSR envelope tests all confirmed a consistent story: only a dozen regulatory monitors cover a 10,598.78 km² county and most of them sit within a few hundred meters of the same freeway spine. The inhomogeneous Poisson regression quantified this bias by showing that fitted intensity declines sharply as distance from major roads increases, while the L-function indicated clustering well beyond random placement—evidence that siting decisions have been path dependent rather than coverage-driven.
+Pulling together EPA PM2.5 data, TIGER boundaries, and OSM roads let me run a reproducible point-pattern deep dive on Los Angeles. Every diagnostic pointed in the same direction: twelve monitors cover more than ten thousand square kilometers, and most of them sit within a short walk of the same freeway spine. The inhomogeneous Poisson model puts numbers on that bias and the L-function shows clustering well beyond random placement, so this isn’t just a cartography quirk.
 
-From a policy and business perspective, the current PM2.5 network misrepresents where Angelenos actually live and breathe. Air district planners, consultants, and sustainability teams who rely on these monitors to estimate compliance or prioritize investments could easily mis-target resources: the network over-samples freeway corridors (where mitigation projects are already expensive) and under-samples inland warehouses, port communities, and rapidly growing suburbs. The quantitative evidence presented here—steep distance penalties in the Poisson model and clear clustering beyond CSR—provides a defensible case for reallocating capital toward new sensors in underserved neighborhoods. Investing in additional monitors or low-cost sensor deployments now would de-risk regulatory enforcement, improve environmental justice reporting, and supply more reliable data to businesses that must justify clean-air upgrades.
+For planners, consultants, or businesses leaning on this network, that imbalance matters. It likely inflates traffic-related exposure while muting port or warehouse impacts, which means investments could drift toward already over-monitored corridors. A modest expansion—maybe a few regulatory relocations plus low-cost sensors in inland and harbor communities—could rebalance the coverage and give residents data that better reflects their lived air. Worth thinking about before the next compliance cycle arrives.
