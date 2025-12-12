@@ -1,0 +1,43 @@
+## Download Data
+```{r}
+# Load required packages
+library(sf)
+library(tigris)
+library(dplyr)
+
+options(tigris_use_cache = TRUE)
+
+la_county <- counties(state = "CA", cb = TRUE) %>%
+  filter(NAME == "Los Angeles")
+
+
+# Write shapefile
+st_write(la_county, "data/la_boundary.shp", delete_dsn = TRUE)
+
+```
+
+```{r}
+library(osmdata)
+library(sf)
+library(dplyr)
+
+# Load LA boundary
+la_boundary <- st_read("data/la_boundary.shp")
+la_bbox <- st_bbox(la_boundary)
+
+# Download major roads
+roads <- opq(bbox = la_bbox) %>%
+  add_osm_feature(
+    key = "highway",
+    value = c("motorway", "trunk", "primary")
+  ) %>%
+  osmdata_sf()
+
+major_roads <- roads$osm_lines
+
+# Keep only fields useful for analysis
+roads_clean <- major_roads[, c("osm_id", "highway", "name", "geometry")]
+
+st_write(roads_clean, "data/la_major_roads.shp", delete_dsn = TRUE)
+```
+
