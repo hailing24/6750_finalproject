@@ -21,7 +21,7 @@ Going in, I really had two questions: (1) do the PM2.5 monitors pile up near maj
 
 ## Literature Review
 
-Two threads in the literature pushed me toward this project. Environmental justice work keeps reminding us that communities of color shoulder disproportionate pollution near big roads, while the monitors that should document those loads show up late or never (_e.g._, Clark et al., 2017; Woo et al., 2019). At the same time, spatial statistics folks like Diggle (2013) warn that when we place monitors badly, every downstream model inherits those first- and second-order wobbles. Put differently, hugging freeways might catch the nastiest emissions, but it also risks missing inland valleys or the port, so the “average” picture looks cleaner than it feels. I leaned on those insights when choosing the regression and point-pattern tools below.
+Two threads in the literature pushed me toward this project. Environmental justice work keeps reminding us that communities of color shoulder disproportionate pollution near big roads, while the monitors that should document those loads show up late or never. At the same time, spatial statistics folks like Diggle (2013) warn that when we place monitors badly, every downstream model inherits those first- and second-order wobbles. Put differently, hugging freeways might catch the nastiest emissions, but it also risks missing inland valleys or the port, so the “average” picture looks cleaner than it feels. I leaned on those insights when choosing the regression and point-pattern tools below.
 
 ## Methodology
 
@@ -59,7 +59,7 @@ The next trio of figures translates those gut feelings into formal diagnostics, 
 
 ![Observed L-function relative to the CSR envelope (999 simulations).](plots/la_monitor_L_function.png)
 
-The kernel smoother and the model-based intensity surface peak over the same freeway-heavy basin, so the distance covariate is pulling real weight rather than serving as a decorative map. Meanwhile, the observed L-function rides above the CSR envelope across a wide range of distances, which is a polite way of saying “yep, the sites cluster even after you account for the road trend.” Pairing these visuals with the distance maps convinced me the regression results weren’t just statistical noise.
+The kernel smoother and the model-based intensity surface peak over the same freeway-heavy basin, so the distance covariate is pulling real weight rather than serving as a decorative map. Meanwhile, the observed L-function rides above the CSR envelope across a wide range of distances, which is a polite way of saying “yes, the sites cluster even after you account for the road trend.” Pairing these visuals with the distance maps convinced me the regression results weren’t just statistical noise.
 
 ## Hypothesis Testing (Regression)
 
@@ -87,10 +87,9 @@ Also yes. The observed L-function rides above the CSR envelope for a wide span o
 **Implications.**  
 Because of this bias, huge swaths of the county lack a local monitor while road-adjacent areas get sampled repeatedly. That setup probably overplays traffic emissions and underplays port or warehouse plumes. Any exposure assessment or compliance check using this network needs to correct for the sampling bias or augment the system with low-cost sensors in the neighborhoods that currently have no voice in the data.
 
-Everything on this page stitches together the prep, EDA, and methods work so you don’t have to bounce between tabs.
 
 ## Conclusion
 
 Pulling together EPA PM2.5 data, TIGER boundaries, and OSM roads let me run a reproducible point-pattern deep dive on Los Angeles. Every diagnostic pointed in the same direction: twelve monitors cover more than ten thousand square kilometers, and most of them sit within a short walk of the same freeway spine. The inhomogeneous Poisson model puts numbers on that bias and the L-function shows clustering well beyond random placement, so this isn’t just a cartography quirk.
 
-For planners, consultants, or businesses leaning on this network, that imbalance matters. It likely inflates traffic-related exposure while muting port or warehouse impacts, which means investments could drift toward already over-monitored corridors. A modest expansion—maybe a few regulatory relocations plus low-cost sensors in inland and harbor communities—could rebalance the coverage and give residents data that better reflects their lived air. Worth thinking about before the next compliance cycle arrives.
+For planners, consultants, or businesses leaning on this network, that imbalance matters. It likely inflates traffic-related exposure while muting port or warehouse impacts, which means investments could drift toward already over-monitored corridors. A modest expansion(maybe a few regulatory relocations plus low-cost sensors in inland and harbor communities) could rebalance the coverage and give residents data that better reflects their lived air. Worth thinking about before the next compliance cycle arrives.
