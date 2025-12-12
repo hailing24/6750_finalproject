@@ -1,0 +1,617 @@
+## Download Data
+```{r}
+# Load required packages
+library(sf)
+library(tigris)
+library(dplyr)
+
+options(tigris_use_cache = TRUE)
+
+la_county <- counties(state = "CA", cb = TRUE) %>%
+  filter(NAME == "Los Angeles")
+
+
+# Write shapefile
+st_write(la_county, "data/la_boundary.shp", delete_dsn = TRUE)
+
+```
+
+```{r}
+library(osmdata)
+library(sf)
+library(dplyr)
+
+# Load LA boundary
+la_boundary <- st_read("data/la_boundary.shp")
+la_bbox <- st_bbox(la_boundary)
+
+# Download major roads
+roads <- opq(bbox = la_bbox) %>%
+  add_osm_feature(
+    key = "highway",
+    value = c("motorway", "trunk", "primary")
+  ) %>%
+  osmdata_sf()
+
+major_roads <- roads$osm_lines
+
+# Keep only fields useful for analysis
+roads_clean <- major_roads[, c("osm_id", "highway", "name", "geometry")]
+
+st_write(roads_clean, "data/la_major_roads.shp", delete_dsn = TRUE)
+```
+
+
+## Load Data
+```{r}
+library(tidyverse)
+
+sites <- read_csv("data/aqs_sites.csv")
+names(sites)
+head(sites)
+
+pm <- read_csv("data/daily_pm25.csv")
+names(pm)
+head(pm)
+```
+
+## Clean and prepare Point Pattern Data
+```{r}
+library(dplyr)
+library(readr)
+library(sf)
+library(stringr)
+
+# Ensure source tables are available when running this chunk alone
+if (!exists("sites")) {
+  sites <- read_csv("data/aqs_sites.csv", show_col_types = FALSE)
+}
+
+if (!exists("pm")) {
+  pm <- read_csv("data/daily_pm25.csv", show_col_types = FALSE)
+}
+
+# Build the standard Site ID for the site metadata table
+sites_clean <- sites %>%
+  mutate(
+    site_id = str_c(
+      str_pad(as.character(`State Code`), 2, pad = "0"),
+      str_pad(as.character(`County Code`), 3, pad = "0"),
+      str_pad(as.character(`Site Number`), 4, pad = "0")
+    )
+  ) %>%
+  dplyr::select(
+    site_id,
+    latitude = Latitude,
+    longitude = Longitude,
+    land_use = `Land Use`,
+    location_setting = `Location Setting`,
+    county_name = `County Name`
+  )
+
+# Merge PM2.5 data with the site metadata and keep needed columns
+pm_sites <- pm %>%
+  mutate(site_id = str_trim(`Site ID`)) %>%
+  dplyr::select(
+    Date,
+    site_id,
+    pm25 = `Daily Mean PM2.5 Concentration`
+  ) %>%
+  inner_join(sites_clean, by = "site_id")
+
+# Filter to Los Angeles County monitors
+la_pm <- pm_sites %>%
+  filter(county_name == "Los Angeles")
+
+# Remove rows with missing coordinates before spatial conversion
+na_coords <- la_pm %>%
+  summarize(n_na = sum(is.na(latitude) | is.na(longitude))) %>%
+  pull(n_na)
+
+if (na_coords > 0) {
+  message(sprintf("Removed %s rows with missing coordinates.", na_coords))
+}
+
+la_pm_complete <- la_pm %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+# Convert to sf point geometry and save for later use
+la_pm_points <- la_pm_complete %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+st_write(la_pm_points, "data/la_pm_points.gpkg", delete_dsn = TRUE, quiet = TRUE)
+
+la_pm_points
+```
+
+## Spatial EDA
+```{r}
+library(ggplot2)
+
+if (!exists("la_pm_points")) {
+  stop("Run Step 1 chunk to create the la_pm_points object before plotting.")
+}
+
+la_boundary <- st_read("data/la_boundary.shp", quiet = TRUE) %>%
+  st_transform(4326)
+la_roads <- st_read("data/la_major_roads.shp", quiet = TRUE)
+dir.create("plots", showWarnings = FALSE)
+
+la_bbox <- st_bbox(la_boundary)
+lon_breaks <- pretty(c(la_bbox["xmin"], la_bbox["xmax"]), n = 4)
+lat_breaks <- pretty(c(la_bbox["ymin"], la_bbox["ymax"]), n = 4)
+
+la_monitors <- la_pm_points %>%
+  st_drop_geometry() %>%
+  group_by(site_id, land_use, location_setting) %>%
+  summarise(
+    pm25_mean = mean(pm25, na.rm = TRUE),
+    longitude = first(longitude),
+    latitude = first(latitude),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(pm25_mean)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+map_base <- ggplot() +
+  geom_sf(data = la_boundary, fill = NA, color = "grey40", linewidth = 0.6) +
+  coord_sf(
+    xlim = c(la_bbox["xmin"], la_bbox["xmax"]),
+    ylim = c(la_bbox["ymin"], la_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  scale_x_continuous(
+    breaks = lon_breaks,
+    labels = function(x) sprintf("%.1f°W", abs(x))
+  ) +
+  scale_y_continuous(
+    breaks = lat_breaks,
+    labels = function(x) sprintf("%.1f°N", x)
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_text(size = 9),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+monitor_locations_plot <- map_base +
+  geom_sf(data = la_monitors, size = 2.3, alpha = 0.9, color = "#0072B2") +
+  labs(
+    title = "LA Boundary + Monitor Locations",
+    subtitle = "Spatial coverage of PM2.5 monitors in Los Angeles County"
+  )
+
+monitor_locations_plot
+
+ggsave(
+  filename = "plots/la_monitor_locations.png",
+  plot = monitor_locations_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+```{r}
+pm25_monitors_plot <- map_base +
+  geom_sf(data = la_monitors, aes(color = pm25_mean), size = 2.6, alpha = 0.95) +
+  scale_color_viridis_c(option = "C", name = "Mean PM2.5 (µg/m³)") +
+  labs(
+    title = "LA Boundary + PM2.5 Monitors",
+    subtitle = "Point color encodes average daily PM2.5 concentration"
+  )
+
+pm25_monitors_plot
+
+ggsave(
+  filename = "plots/la_pm25_monitors.png",
+  plot = pm25_monitors_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+```{r}
+roads_pm25_plot <- map_base +
+  geom_sf(data = la_roads, color = "gray75", linewidth = 0.35) +
+  geom_sf(data = la_monitors, aes(color = pm25_mean), size = 2.5, alpha = 0.95) +
+  scale_color_viridis_c(option = "C", name = "Mean PM2.5 (µg/m³)") +
+  labs(
+    title = "LA Boundary + Major Roads + Monitors",
+    subtitle = "Helps assess whether higher PM2.5 levels cluster near major corridors"
+  )
+
+roads_pm25_plot
+
+ggsave(
+  filename = "plots/la_major_roads_monitors.png",
+  plot = roads_pm25_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+## PM2.5 vs Distance to Major Roads
+```{r}
+library(sf)
+library(dplyr)
+
+if (!exists("la_monitors") || !exists("la_roads")) {
+  stop("Run the spatial EDA chunk first so `la_monitors` and `la_roads` exist.")
+}
+
+la_monitors_proj <- st_transform(la_monitors, 3310)
+la_roads_proj <- st_transform(la_roads, 3310)
+
+nearest_idx <- st_nearest_feature(la_monitors_proj, la_roads_proj)
+distances_m <- st_distance(
+  la_monitors_proj,
+  la_roads_proj[nearest_idx, ],
+  by_element = TRUE
+)
+
+monitor_distances <- la_monitors_proj %>%
+  st_drop_geometry() %>%
+  mutate(
+    distance_to_road_km = as.numeric(distances_m) / 1000
+  )
+
+summary(monitor_distances$distance_to_road_km)
+```
+
+```{r}
+library(ggplot2)
+dir.create("plots", showWarnings = FALSE)
+
+pm25_distance_plot <- ggplot(monitor_distances, aes(
+  x = distance_to_road_km,
+  y = pm25_mean
+)) +
+  geom_point(alpha = 0.75, color = "#0072B2") +
+  geom_smooth(method = "loess", se = TRUE, color = "#D55E00") +
+  labs(
+    title = "PM2.5 vs. Distance to Nearest Major Road",
+    subtitle = "First-order exploratory look at potential proximity effects",
+    x = "Distance to major road (km)",
+    y = "Mean PM2.5 (µg/m³)"
+  ) +
+  theme_minimal()
+
+pm25_distance_plot
+
+ggsave(
+  filename = "plots/la_pm25_distance_to_roads.png",
+  plot = pm25_distance_plot,
+  width = 6,
+  height = 4,
+  dpi = 320
+)
+```
+
+## Distance to Major Roads Map
+```{r}
+library(ggplot2)
+
+if (!exists("monitor_distances")) {
+  stop("Run the previous distance calculation chunk first to create `monitor_distances`.")
+}
+
+distance_map_data <- la_monitors %>%
+  left_join(
+    monitor_distances %>%
+      dplyr::select(site_id, distance_to_road_km),
+    by = "site_id"
+  )
+
+distance_map <- map_base +
+  geom_sf(data = la_roads, color = "gray80", linewidth = 0.3) +
+  geom_sf(
+    data = distance_map_data,
+    aes(color = distance_to_road_km),
+    size = 2.7
+  ) +
+  scale_color_viridis_c(
+    option = "C",
+    name = "Distance to major road (km)"
+  ) +
+  labs(
+    title = "Distance from Monitors to Nearest Major Road",
+    subtitle = "Color encodes how far each PM2.5 site is from a major corridor"
+  ) +
+  theme_minimal()
+
+distance_map
+
+ggsave(
+  filename = "plots/la_pm25_distance_map.png",
+  plot = distance_map,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+## Spatial EDA Prep for LISA
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+
+if (!exists("la_pm_points")) {
+  la_pm_points <- st_read("data/la_pm_points.gpkg", quiet = TRUE)
+}
+
+la_monitors <- la_pm_points %>%
+  st_drop_geometry() %>%
+  group_by(site_id, land_use, location_setting) %>%
+  summarise(
+    pm25_mean = mean(pm25, na.rm = TRUE),
+    longitude = first(longitude),
+    latitude = first(latitude),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(pm25_mean)) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+if (!exists("la_boundary")) {
+  la_boundary <- st_read("data/la_boundary.shp", quiet = TRUE)
+}
+
+if (!exists("la_roads")) {
+  la_roads <- st_read("data/la_major_roads.shp", quiet = TRUE)
+}
+
+if (!exists("map_base")) {
+  la_bbox <- st_bbox(la_boundary)
+  lon_breaks <- pretty(c(la_bbox["xmin"], la_bbox["xmax"]), n = 4)
+  lat_breaks <- pretty(c(la_bbox["ymin"], la_bbox["ymax"]), n = 4)
+
+  map_base <- ggplot() +
+    geom_sf(data = la_boundary, fill = NA, color = "grey40", linewidth = 0.6) +
+    coord_sf(
+      xlim = c(la_bbox["xmin"], la_bbox["xmax"]),
+      ylim = c(la_bbox["ymin"], la_bbox["ymax"]),
+      expand = FALSE
+    ) +
+    scale_x_continuous(
+      breaks = lon_breaks,
+      labels = function(x) sprintf("%.1f°W", abs(x))
+    ) +
+    scale_y_continuous(
+      breaks = lat_breaks,
+      labels = function(x) sprintf("%.1f°N", x)
+    ) +
+    theme_minimal() +
+    theme(
+      axis.title = element_blank(),
+      axis.text = element_text(size = 9),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+```
+
+```{r}
+# LISA tuning parameters
+k_neighbors <- 4
+lisa_alpha <- 0.1
+use_adjusted_p <- FALSE  
+```
+
+## Local Moran's I (LISA Map)
+```{r}
+library(spdep)
+library(dplyr)
+
+if (!exists("la_monitors") || !exists("map_base")) {
+  stop("Run the Spatial EDA prep chunk so `la_monitors` and `map_base` exist.")
+}
+
+la_monitors_proj <- st_transform(la_monitors, 3310)
+coords <- st_coordinates(la_monitors_proj)
+knn <- knearneigh(coords, k = k_neighbors)
+nb <- knn2nb(knn)
+listw <- nb2listw(nb, style = "W")
+
+local_moran <- localmoran(la_monitors_proj$pm25_mean, listw)
+lag_pm25 <- lag.listw(listw, la_monitors_proj$pm25_mean)
+pm_mean <- mean(la_monitors_proj$pm25_mean, na.rm = TRUE)
+
+lisa_table <- tibble(
+  site_id = la_monitors_proj$site_id,
+  pm25_mean = la_monitors_proj$pm25_mean,
+  lag_pm25 = lag_pm25,
+  local_i = local_moran[, "Ii"],
+  z_score = local_moran[, "Z.Ii"],
+  p_value = local_moran[, "Pr(z != E(Ii))"]
+) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),
+    p_for_flag = if (use_adjusted_p) p_adj else p_value,
+    sig = p_for_flag < lisa_alpha,
+    quadrant = case_when(
+      pm25_mean - pm_mean > 0 & lag_pm25 - pm_mean > 0 ~ "High-High",
+      pm25_mean - pm_mean < 0 & lag_pm25 - pm_mean < 0 ~ "Low-Low",
+      pm25_mean - pm_mean > 0 & lag_pm25 - pm_mean < 0 ~ "High-Low",
+      pm25_mean - pm_mean < 0 & lag_pm25 - pm_mean > 0 ~ "Low-High",
+      TRUE ~ "Undefined"
+    ),
+    lisa_category = if_else(sig, quadrant, "Not significant"),
+    lisa_category = factor(
+      lisa_category,
+      levels = c("High-High", "Low-Low", "High-Low", "Low-High", "Not significant")
+    )
+  )
+
+lisa_table %>%
+  count(lisa_category)
+```
+
+```{r}
+library(ggplot2)
+dir.create("plots", showWarnings = FALSE)
+
+lisa_map_data <- la_monitors %>%
+  left_join(
+    lisa_table %>% st_drop_geometry() %>% dplyr::select(site_id, lisa_category, local_i, p_adj),
+    by = "site_id"
+  )
+
+lisa_palette <- c(
+  "High-High" = "#D55E00",
+  "Low-Low" = "#0072B2",
+  "High-Low" = "#CC79A7",
+  "Low-High" = "#009E73",
+  "Not significant" = "gray80"
+)
+
+lisa_plot <- map_base +
+  geom_sf(
+    data = lisa_map_data,
+    aes(color = lisa_category),
+    size = 2.7,
+    alpha = 0.95
+  ) +
+  scale_color_manual(
+    values = lisa_palette,
+    drop = FALSE,
+    na.value = "gray80",
+    name = "Local Moran's I"
+  ) +
+  labs(
+    title = "Local Moran's I for PM2.5 Monitors",
+    subtitle = "LISA map highlights significant clusters/outliers"
+  )
+
+lisa_plot
+
+ggsave(
+  filename = "plots/la_pm25_lisa_map.png",
+  plot = lisa_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+
+## Kernel Density Map
+```{r}
+library(MASS)
+
+if (!exists("la_monitors") || !exists("map_base")) {
+  stop("Run earlier spatial chunks first to create `la_monitors` and `map_base`.")
+}
+
+dir.create("plots", showWarnings = FALSE)
+
+# Estimate KDE
+monitor_coords <- st_coordinates(la_monitors)
+kde_surface <- MASS::kde2d(
+  monitor_coords[, "X"],
+  monitor_coords[, "Y"],
+  n = 200
+)
+
+# Convert to sf and clip to the LA boundary
+kde_df <- expand.grid(
+  longitude = kde_surface$x,
+  latitude = kde_surface$y
+) %>%
+  mutate(intensity = as.vector(kde_surface$z))
+
+kde_points <- st_as_sf(
+  kde_df,
+  coords = c("longitude", "latitude"),
+  crs = st_crs(la_monitors),
+  remove = FALSE
+)
+
+inside_boundary <- as.vector(st_within(kde_points, la_boundary, sparse = FALSE)[, 1])
+kde_df_clipped <- kde_df %>%
+  mutate(intensity = if_else(inside_boundary, intensity, NA_real_))
+
+# Plot clipped KDE
+clipped_kernel_plot <- map_base +
+  geom_raster(
+    data = kde_df_clipped,
+    aes(x = longitude, y = latitude, fill = intensity),
+    alpha = 0.85,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_viridis_c(
+    option = "C",
+    na.value = NA,
+    name = "Monitor intensity"
+  ) +
+  geom_sf(data = la_boundary, fill = NA, color = "gray20", linewidth = 0.4) +
+  geom_sf(data = la_monitors, color = "white", size = 1.6, alpha = 0.9) +
+  labs(
+    title = "Kernel Density Clipped to LA Boundary",
+    subtitle = "Density surface masked to the county polygon"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+clipped_kernel_plot
+
+ggsave(
+  filename = "plots/la_monitor_kernel_density_clipped.png",
+  plot = clipped_kernel_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+## PM2.5 by Land Use
+```{r}
+library(ggplot2)
+library(dplyr)
+
+if (!exists("la_monitors")) {
+  stop("Run earlier spatial chunks first to create `la_monitors`.")
+}
+
+land_use_stats <- la_monitors %>%
+  st_drop_geometry() %>%
+  filter(!is.na(land_use), land_use != " ") %>%
+  mutate(
+    land_use = forcats::fct_infreq(land_use)
+  )
+
+pm25_landuse_boxplot <- ggplot(land_use_stats, aes(x = land_use, y = pm25_mean)) +
+  geom_boxplot(fill = "#0072B2", alpha = 0.75, color = "gray20") +
+  geom_jitter(width = 0.15, alpha = 0.5, color = "black") +
+  labs(
+    title = "PM2.5 by Land Use Type",
+    subtitle = "Boxplots show distribution of monitor means across land uses",
+    x = "Land use",
+    y = "Mean PM2.5 (µg/m³)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1)
+  )
+
+pm25_landuse_boxplot
+
+ggsave(
+  filename = "plots/la_pm25_landuse_boxplot.png",
+  plot = pm25_landuse_boxplot,
+  width = 6.5,
+  height = 4.5,
+  dpi = 320
+)
+```
+

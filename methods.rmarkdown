@@ -1,0 +1,375 @@
+## Point Pattern Modeling Setup
+We construct a planar point pattern for the PM2.5 monitors using the saved boundary, roads, and monitor point layers. This provides the window, points, and road-distance covariate used throughout the methods section.
+
+
+
+```{r}
+library(sf)
+library(dplyr)
+library(spatstat.geom)
+library(spatstat.core)
+library(spatstat.random)
+library(sp)
+
+sf_to_owin <- function(sf_obj) {
+  sp_obj <- sf::as_Spatial(st_geometry(sf_obj))
+  if (!inherits(sp_obj, "SpatialPolygons")) {
+    stop("sf_to_owin() requires polygonal geometry")
+  }
+
+  rings <- unlist(lapply(sp_obj@polygons, function(pg) pg@Polygons), recursive = FALSE)
+
+  poly_list <- lapply(rings, function(ring) {
+    coords <- ring@coords
+    if (!isTRUE(all.equal(coords[1, ], coords[nrow(coords), ]))) {
+      coords <- rbind(coords, coords[1, ])
+    }
+
+    signed_area <- 0.5 * sum(
+      coords[-nrow(coords), 1] * coords[-1, 2] -
+        coords[-1, 1] * coords[-nrow(coords), 2]
+    )
+
+    if ((!ring@hole && signed_area < 0) || (ring@hole && signed_area > 0)) {
+      coords <- coords[nrow(coords):1, , drop = FALSE]
+    }
+
+    list(x = coords[, 1], y = coords[, 2], hole = ring@hole)
+  })
+
+  owin(poly = poly_list)
+}
+
+sf_lines_to_psp <- function(sf_obj, window) {
+  if (!inherits(window, "owin")) {
+    stop("sf_lines_to_psp() requires a polygonal window")
+  }
+
+  geom <- st_geometry(sf_obj)
+  geom <- st_cast(geom, "LINESTRING", warn = FALSE)
+
+  segs <- lapply(geom, function(line) {
+    coords <- st_coordinates(line)
+    if (nrow(coords) < 2) {
+      return(NULL)
+    }
+
+    tibble::tibble(
+      x0 = coords[-nrow(coords), 1],
+      y0 = coords[-nrow(coords), 2],
+      x1 = coords[-1, 1],
+      y1 = coords[-1, 2]
+    )
+  })
+
+  segs <- purrr::compact(segs)
+  seg_df <- dplyr::bind_rows(segs)
+
+  psp(
+    x0 = seg_df$x0,
+    y0 = seg_df$y0,
+    x1 = seg_df$x1,
+    y1 = seg_df$y1,
+    window = window,
+    check = FALSE
+  )
+}
+
+la_pm_points <- st_read("data/la_pm_points.gpkg", quiet = TRUE)
+la_boundary <- st_read("data/la_boundary.shp", quiet = TRUE)
+la_roads <- st_read("data/la_major_roads.shp", quiet = TRUE)
+
+la_monitors <- la_pm_points %>%
+  group_by(site_id, land_use, location_setting) %>%
+  summarise(
+    pm25_mean = mean(pm25, na.rm = TRUE),
+    do_union = FALSE
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(pm25_mean))
+
+la_boundary_proj <- st_transform(la_boundary, 3310)
+la_monitors_proj <- st_transform(la_monitors, 3310)
+la_roads_proj <- st_transform(la_roads, 3310)
+
+la_window <- sf_to_owin(la_boundary_proj)
+coords <- st_coordinates(la_monitors_proj)
+monitor_coords_df <- tibble::as_tibble(coords) %>%
+  rename(x = X, y = Y)
+
+monitor_ppp <- ppp(
+  x = coords[, "X"],
+  y = coords[, "Y"],
+  window = la_window
+)
+
+roads_psp <- sf_lines_to_psp(la_roads_proj, la_window)
+dist_to_road_fun <- distfun(roads_psp)
+
+nearest_idx <- st_nearest_feature(la_monitors_proj, la_roads_proj)
+distances_m <- st_distance(
+  la_monitors_proj,
+  la_roads_proj[nearest_idx, ],
+  by_element = TRUE
+)
+
+monitor_distances <- la_monitors_proj %>%
+  st_drop_geometry() %>%
+  mutate(distance_to_road_km = as.numeric(distances_m) / 1000)
+
+summary(monitor_ppp)
+```
+
+
+
+## First-order Structure: Kernel Intensity
+The kernel-smoothed intensity surface highlights where monitors are more densely placed—a global first-order signal. Diggle's bandwidth rule automatically sets the smoothing scale.
+
+
+
+```{r}
+library(ggplot2)
+dir.create("plots", showWarnings = FALSE)
+
+kernel_bw <- bw.diggle(monitor_ppp)
+kernel_intensity <- density(monitor_ppp, sigma = kernel_bw, edge = TRUE)
+kernel_df <- as.data.frame(kernel_intensity)
+
+kernel_intensity_plot <- ggplot(kernel_df, aes(x = x, y = y, fill = value)) +
+  geom_tile(alpha = 0.9) +
+  geom_point(
+    data = monitor_coords_df,
+    aes(x = x, y = y),
+    inherit.aes = FALSE,
+    color = "white",
+    size = 0.9
+  ) +
+  scale_fill_viridis_c(option = "B", name = "Intensity\n(points/km²)") +
+  coord_equal() +
+  labs(
+    title = "Kernel Intensity of Monitor Locations",
+    subtitle = sprintf("Diggle bandwidth σ = %.0f m", kernel_bw),
+    x = "Easting (m, EPSG:3310)",
+    y = "Northing (m, EPSG:3310)"
+  ) +
+  theme_minimal()
+
+kernel_intensity_plot
+
+ggsave(
+  filename = "plots/la_monitor_kernel_intensity.png",
+  plot = kernel_intensity_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+
+
+## Intensity Relative to Major Roads (First-order Hypothesis Test)
+We fit an inhomogeneous Poisson process where intensity depends on distance to the nearest major road. A significantly negative slope implies monitors concentrate near the road network.
+
+
+
+```{r}
+distance_surface <- as.im(dist_to_road_fun, W = la_window)
+inhom_model <- ppm(
+  monitor_ppp ~ dist_to_road,
+  covariates = list(dist_to_road = distance_surface)
+)
+
+summary(inhom_model)
+```
+
+```{r}
+trend_surface <- predict(inhom_model, type = "trend")
+trend_df <- as.data.frame(trend_surface)
+dir.create("plots", showWarnings = FALSE)
+
+trend_plot <- ggplot(trend_df, aes(x = x, y = y, fill = value)) +
+  geom_tile(alpha = 0.9) +
+  geom_point(
+    data = monitor_coords_df,
+    aes(x = x, y = y),
+    inherit.aes = FALSE,
+    color = "white",
+    size = 0.9
+  ) +
+  scale_fill_viridis_c(option = "C", name = "λ(s)") +
+  coord_equal() +
+  labs(
+    title = "Predicted Inhomogeneous Intensity",
+    subtitle = "Poisson model with distance-to-road covariate",
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme_minimal()
+
+trend_plot
+
+ggsave(
+  filename = "plots/la_inhom_intensity.png",
+  plot = trend_plot,
+  width = 6,
+  height = 6,
+  dpi = 320
+)
+```
+
+```{r}
+coef_vec <- coef(inhom_model)
+distance_effect_df <- tibble::tibble(
+  distance_km = seq(0, max(monitor_distances$distance_to_road_km), length.out = 200)
+) %>%
+  mutate(
+    distance_m = distance_km * 1000,
+    log_lambda = coef_vec["(Intercept)"] + coef_vec["dist_to_road"] * distance_m,
+    lambda = exp(log_lambda)
+  )
+
+distance_effect_plot <- ggplot(distance_effect_df, aes(x = distance_km, y = lambda)) +
+  geom_line(color = "#D55E00", linewidth = 1) +
+  labs(
+    title = "Predicted Monitor Intensity vs. Road Distance",
+    x = "Distance to major road (km)",
+    y = "λ(s) (points per km²)"
+  ) +
+  theme_minimal()
+
+distance_effect_plot
+```
+
+```{r}
+set.seed(6805)
+quadrat_fit <- quadrat.test(monitor_ppp, fit = inhom_model, nsim = 199)
+quadrat_fit
+```
+
+
+
+## Second-order Structure and Monte Carlo Testing
+Pair-correlation and L-function envelopes test for clustering beyond first-order variation. We contrast the empirical curves with simulations from (a) CSR and (b) the fitted inhomogeneous model.
+
+
+
+```{r}
+library(dplyr)
+set.seed(6805)
+dir.create("plots", showWarnings = FALSE)
+
+pcf_env_csr <- envelope(
+  monitor_ppp,
+  fun = pcf,
+  nsim = 9999,
+  nrank = 1,
+  correction = "translation",
+  global = TRUE
+)
+
+pcf_env_df <- as_tibble(pcf_env_csr) %>%
+  select(r, obs, lo, hi)
+
+pcf_csr_plot <- ggplot(pcf_env_df, aes(x = r)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "gray85") +
+  geom_line(aes(y = obs), color = "#0072B2", linewidth = 1) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+  labs(
+    title = "Pair Correlation Envelope (CSR)",
+    subtitle = "Observed g(r) compared with 99 CSR simulations",
+    x = "r (meters)",
+    y = "g(r)"
+  ) +
+  theme_minimal()
+
+pcf_csr_plot
+
+ggsave(
+  filename = "plots/la_monitor_pcf_csr.png",
+  plot = pcf_csr_plot,
+  width = 6.2,
+  height = 4,
+  dpi = 320
+)
+```
+
+```{r}
+set.seed(6805)
+dir.create("plots", showWarnings = FALSE)
+pcf_env_inhom <- envelope(
+  inhom_model,
+  fun = pcf,
+  nsim = 99,
+  nrank = 1,
+  global = TRUE
+)
+
+pcf_inhom_df <- as_tibble(pcf_env_inhom) %>%
+  select(r, obs, lo, hi)
+
+pcf_inhom_plot <- ggplot(pcf_inhom_df, aes(x = r)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "gray90") +
+  geom_line(aes(y = obs), color = "#D55E00", linewidth = 1) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+  labs(
+    title = "Pair Correlation Envelope (Inhomogeneous Poisson)",
+    subtitle = "Simulations drawn from the fitted distance-to-road model",
+    x = "r (meters)",
+    y = "g(r)"
+  ) +
+  theme_minimal()
+
+pcf_inhom_plot
+
+ggsave(
+  filename = "plots/la_monitor_pcf_inhom.png",
+  plot = pcf_inhom_plot,
+  width = 6.2,
+  height = 4,
+  dpi = 320
+)
+```
+
+```{r}
+set.seed(6805)
+dir.create("plots", showWarnings = FALSE)
+L_env <- envelope(
+  monitor_ppp,
+  fun = Lest,
+  nsim = 9999,
+  nrank = 1,
+  correction = "translation",
+  global = TRUE
+)
+
+L_df <- as_tibble(L_env) %>%
+  select(r, obs, lo, hi) %>%
+  mutate(
+    L_centered = obs - r,
+    lo_centered = lo - r,
+    hi_centered = hi - r
+  )
+
+L_plot <- ggplot(L_df, aes(x = r)) +
+  geom_ribbon(aes(ymin = lo_centered, ymax = hi_centered), fill = "gray85") +
+  geom_line(aes(y = L_centered), color = "black", linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  labs(
+    title = "Centered L-function Envelope (CSR)",
+    subtitle = "Positive departures imply clustering beyond CSR",
+    x = "r (meters)",
+    y = "L(r) - r"
+  ) +
+  theme_minimal()
+
+L_plot
+
+ggsave(
+  filename = "plots/la_monitor_L_function.png",
+  plot = L_plot,
+  width = 6.2,
+  height = 4,
+  dpi = 320
+)
+```
+
